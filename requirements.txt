@@ -1,7 +1,5 @@
 streamlit==1.44.1
+streamlit-qrcode-scanner
 gspread
 google-auth
 pandas
-numpy
-opencv-python-headless
-zxing-cpp
