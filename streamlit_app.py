@@ -8,11 +8,14 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 
 
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
 st.set_page_config(
     page_title="Scanner Fiche Réception",
     layout="centered",
 )
-
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -34,27 +37,42 @@ REQUIRED_HEADERS = [
 ]
 
 
+# ---------------------------------------------------------
+# Fonctions générales
+# ---------------------------------------------------------
+
 def clean_barcode(value):
-    """Nettoie un code-barres ou un QR code."""
-    return str(value or "").replace(" ", "").replace("\n", "").strip()
+    """Nettoie un QR code ou un code-barres."""
+    return (
+        str(value or "")
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("\r", "")
+        .strip()
+    )
 
 
 def safe_int(value):
-    """Convertit une valeur en entier sans faire planter l'application."""
+    """Convertit une valeur en entier sans provoquer d'erreur."""
     try:
         return int(float(str(value).strip()))
     except (TypeError, ValueError):
         return 0
 
 
+# ---------------------------------------------------------
+# Connexion Google Sheets
+# ---------------------------------------------------------
+
 @st.cache_resource
 def get_client():
-    """Crée et conserve la connexion Google Sheets."""
+    """Crée la connexion au compte de service Google."""
     try:
         service_account = st.secrets["gcp_service_account"]
     except KeyError as error:
         raise RuntimeError(
-            "Le secret [gcp_service_account] est absent dans Streamlit Cloud."
+            "Le secret [gcp_service_account] est absent "
+            "des paramètres Streamlit."
         ) from error
 
     credentials = Credentials.from_service_account_info(
@@ -66,9 +84,11 @@ def get_client():
 
 
 def get_sheet(sheet_name):
-    """Ouvre une feuille Google Sheets."""
+    """Ouvre une feuille autorisée."""
     if sheet_name not in ALLOWED_SHEETS:
-        raise ValueError(f"Feuille non autorisée : {sheet_name}")
+        raise ValueError(
+            f"Feuille non autorisée : {sheet_name}"
+        )
 
     client = get_client()
     spreadsheet = client.open_by_key(SHEET_ID)
@@ -77,7 +97,7 @@ def get_sheet(sheet_name):
 
 
 def get_header_map(worksheet):
-    """Retourne un dictionnaire nom_colonne -> numéro de colonne."""
+    """Retourne les colonnes sous la forme nom -> numéro."""
     headers = worksheet.row_values(1)
 
     return {
@@ -88,7 +108,7 @@ def get_header_map(worksheet):
 
 
 def validate_headers(header_map):
-    """Vérifie la présence des colonnes nécessaires."""
+    """Vérifie que les colonnes nécessaires existent."""
     missing_headers = [
         header
         for header in REQUIRED_HEADERS
@@ -102,72 +122,12 @@ def validate_headers(header_map):
         )
 
 
-def decode_barcode_from_image_bytes(image_bytes):
-    """
-    Décode d'abord un QR code.
-    Si aucun QR code n'est détecté, tente un code-barres classique.
-    """
-    if not image_bytes:
-        return None
-
-    file_array = np.frombuffer(image_bytes, dtype=np.uint8)
-    image = cv2.imdecode(file_array, cv2.IMREAD_COLOR)
-
-    if image is None:
-        return None
-
-    # Tentative QR code.
-    qr_detector = cv2.QRCodeDetector()
-
-    try:
-        decoded_info, points, straight_qrcode = (
-            qr_detector.detectAndDecode(image)
-        )
-
-        decoded_info = clean_barcode(decoded_info)
-
-        if decoded_info:
-            return decoded_info
-    except cv2.error:
-        pass
-
-    # Tentative code-barres classique si disponible.
-    try:
-        if hasattr(cv2, "barcode") and hasattr(
-            cv2.barcode,
-            "BarcodeDetector",
-        ):
-            barcode_detector = cv2.barcode.BarcodeDetector()
-            result = barcode_detector.detectAndDecode(image)
-
-            if isinstance(result, tuple):
-                if len(result) == 4:
-                    ok, decoded_info, decoded_type, points = result
-
-                    if ok and decoded_info:
-                        if isinstance(decoded_info, (list, tuple)):
-                            return clean_barcode(decoded_info[0])
-
-                        return clean_barcode(decoded_info)
-
-                elif len(result) == 3:
-                    decoded_info, decoded_type, points = result
-
-                    if isinstance(decoded_info, (list, tuple)):
-                        if decoded_info:
-                            return clean_barcode(decoded_info[0])
-
-                    elif decoded_info:
-                        return clean_barcode(decoded_info)
-
-    except (cv2.error, AttributeError, TypeError, ValueError):
-        pass
-
-    return None
-
+# ---------------------------------------------------------
+# Lecture des données
+# ---------------------------------------------------------
 
 def get_all_rows(sheet_name):
-    """Récupère les lignes utiles d'une feuille."""
+    """Récupère les lignes d'une feuille."""
     worksheet = get_sheet(sheet_name)
     header_map = get_header_map(worksheet)
     validate_headers(header_map)
@@ -209,9 +169,7 @@ def get_all_rows(sheet_name):
 
 
 def get_fiche_df(sheet_name):
-    """Construit le tableau affiché dans Streamlit."""
-    rows = get_all_rows(sheet_name)
-
+    """Prépare le tableau affiché dans l'application."""
     columns = [
         "Code barre",
         "JumiaSKU",
@@ -219,11 +177,124 @@ def get_fiche_df(sheet_name):
         "Quantity",
     ]
 
+    rows = get_all_rows(sheet_name)
+
     if not rows:
         return pd.DataFrame(columns=columns)
 
     return pd.DataFrame(rows)[columns]
 
+
+# ---------------------------------------------------------
+# Scanner QR et codes-barres
+# ---------------------------------------------------------
+
+def decode_barcode_from_image_bytes(image_bytes):
+    """
+    Détecte un QR code puis un code-barres classique.
+
+    Retourne le code détecté sous forme de texte
+    ou None si aucun code n'est trouvé.
+    """
+    if not image_bytes:
+        return None
+
+    file_array = np.frombuffer(
+        image_bytes,
+        dtype=np.uint8,
+    )
+
+    image = cv2.imdecode(
+        file_array,
+        cv2.IMREAD_COLOR,
+    )
+
+    if image is None:
+        return None
+
+    # -----------------------------------------------------
+    # 1. QR code
+    # -----------------------------------------------------
+
+    try:
+        qr_detector = cv2.QRCodeDetector()
+
+        qr_result = qr_detector.detectAndDecode(image)
+
+        if isinstance(qr_result, tuple):
+            if len(qr_result) >= 1:
+                qr_text = qr_result[0]
+
+                if isinstance(qr_text, str):
+                    qr_text = clean_barcode(qr_text)
+
+                    if qr_text:
+                        return qr_text
+
+    except Exception:
+        pass
+
+    # -----------------------------------------------------
+    # 2. Code-barres classique
+    # -----------------------------------------------------
+
+    try:
+        if not hasattr(cv2, "barcode"):
+            return None
+
+        if not hasattr(
+            cv2.barcode,
+            "BarcodeDetector",
+        ):
+            return None
+
+        barcode_detector = cv2.barcode.BarcodeDetector()
+
+        barcode_result = (
+            barcode_detector.detectAndDecode(image)
+        )
+
+        if not isinstance(barcode_result, tuple):
+            return None
+
+        # Format habituel :
+        # ok, decoded_info, decoded_type, points
+        if len(barcode_result) != 4:
+            return None
+
+        barcode_ok = barcode_result[0]
+        barcode_values = barcode_result[1]
+
+        if not barcode_ok:
+            return None
+
+        if not barcode_values:
+            return None
+
+        if isinstance(
+            barcode_values,
+            (list, tuple),
+        ):
+            for value in barcode_values:
+                cleaned_value = clean_barcode(value)
+
+                if cleaned_value:
+                    return cleaned_value
+
+        cleaned_value = clean_barcode(barcode_values)
+
+        if cleaned_value:
+            return cleaned_value
+
+    except Exception:
+        pass
+
+    return None
+
+
+# ---------------------------------------------------------
+# Mise à jour Google Sheets
+# ---------------------------------------------------------
 
 def scan_and_increment(sheet_name, barcode, quantity):
     """Recherche un code et augmente sa quantité."""
@@ -249,11 +320,11 @@ def scan_and_increment(sheet_name, barcode, quantity):
         }
 
     barcode_column = header_map["Code barre"]
-    jumia_index = header_map["JumiaSKU"] - 1
-    seller_index = header_map["SellerSKU"] - 1
+    quantity_column = header_map["Quantity"]
 
     barcode_index = barcode_column - 1
-    quantity_column = header_map["Quantity"]
+    jumia_index = header_map["JumiaSKU"] - 1
+    seller_index = header_map["SellerSKU"] - 1
 
     for row_number, row in enumerate(values[1:], start=2):
         if len(row) <= barcode_index:
@@ -311,7 +382,7 @@ def scan_and_increment(sheet_name, barcode, quantity):
 
 
 def reset_quantities(sheet_name):
-    """Vide la colonne Quantity sans toucher aux autres colonnes."""
+    """Efface toutes les valeurs de la colonne Quantity."""
     worksheet = get_sheet(sheet_name)
     header_map = get_header_map(worksheet)
     validate_headers(header_map)
@@ -324,16 +395,27 @@ def reset_quantities(sheet_name):
 
     last_row = len(values)
 
+    first_cell = gspread.utils.rowcol_to_a1(
+        2,
+        quantity_column,
+    )
+
+    last_cell = gspread.utils.rowcol_to_a1(
+        last_row,
+        quantity_column,
+    )
+
     worksheet.batch_clear(
-        [
-            f"{gspread.utils.rowcol_to_a1(2, quantity_column)}:"
-            f"{gspread.utils.rowcol_to_a1(last_row, quantity_column)}"
-        ]
+        [f"{first_cell}:{last_cell}"]
     )
 
 
+# ---------------------------------------------------------
+# Affichage des résultats
+# ---------------------------------------------------------
+
 def display_scan_result(result):
-    """Affiche le résultat du scan."""
+    """Affiche le résultat d'un scan."""
     status = result.get("status")
 
     if status == "FOUND_INCREMENTED":
@@ -341,15 +423,19 @@ def display_scan_result(result):
             f"✅ [{result['sheetName']}] "
             f"{result['productLabel']} | "
             f"+{result['addedQty']} | "
-            f"Ancienne quantité : {result['previousQty']} | "
-            f"Nouvelle quantité : {result['newQty']}"
+            f"Ancienne quantité : "
+            f"{result['previousQty']} | "
+            f"Nouvelle quantité : "
+            f"{result['newQty']}"
         )
 
     elif status == "NOT_FOUND":
         st.error(
-            f"❌ Code non trouvé dans {result['sheetName']} : "
+            f"❌ Code non trouvé dans "
+            f"{result['sheetName']} : "
             f"{result['barcode']} | "
-            f"Quantité demandée : {result['addedQty']}"
+            f"Quantité demandée : "
+            f"{result['addedQty']}"
         )
 
     else:
@@ -361,7 +447,12 @@ def display_scan_result(result):
         )
 
 
+# ---------------------------------------------------------
+# Interface Streamlit
+# ---------------------------------------------------------
+
 st.title("Scanner Fiche Réception")
+
 st.caption(
     "Application Streamlit reliée à Google Sheets."
 )
@@ -388,32 +479,53 @@ tab_camera, tab_manual = st.tabs(
 barcode_to_process = None
 process_key = None
 
+
+# ---------------------------------------------------------
+# Onglet caméra
+# ---------------------------------------------------------
+
 with tab_camera:
     st.write(
-        "Prenez une photo nette du QR code ou du code-barres."
+        "Prenez une photo nette du QR code "
+        "ou du code-barres."
     )
 
     camera_image = st.camera_input("Caméra")
 
     if camera_image is not None:
         image_bytes = camera_image.getvalue()
-        image_hash = hashlib.sha256(image_bytes).hexdigest()
 
-        barcode_to_process = decode_barcode_from_image_bytes(
+        image_hash = hashlib.sha256(
+            image_bytes
+        ).hexdigest()
+
+        decoded = decode_barcode_from_image_bytes(
             image_bytes
         )
 
-        process_key = f"camera-{image_hash}-{sheet_name}-{quantity}"
-
-        if barcode_to_process:
+        if decoded:
             st.success(
-                f"Code détecté : {barcode_to_process}"
+                f"Code détecté : {decoded}"
+            )
+
+            barcode_to_process = decoded
+
+            process_key = (
+                f"camera-"
+                f"{image_hash}-"
+                f"{sheet_name}-"
+                f"{quantity}"
             )
         else:
             st.warning(
                 "Aucun QR code ou code-barres détecté. "
-                "Essayez une photo plus nette ou utilisez la saisie manuelle."
+                "Essayez une photo plus nette."
             )
+
+
+# ---------------------------------------------------------
+# Onglet saisie manuelle
+# ---------------------------------------------------------
 
 with tab_manual:
     with st.form("manual_barcode_form"):
@@ -426,18 +538,28 @@ with tab_manual:
         )
 
     if manual_submitted:
-        manual_barcode = clean_barcode(manual_barcode)
+        manual_barcode = clean_barcode(
+            manual_barcode
+        )
 
         if manual_barcode:
             barcode_to_process = manual_barcode
+
             process_key = (
-                f"manual-{manual_barcode}-{sheet_name}-{quantity}"
+                f"manual-"
+                f"{manual_barcode}-"
+                f"{sheet_name}-"
+                f"{quantity}"
             )
         else:
             st.warning(
                 "Veuillez saisir un code-barres."
             )
 
+
+# ---------------------------------------------------------
+# Traitement du code détecté
+# ---------------------------------------------------------
 
 if barcode_to_process and process_key:
     last_process_key = st.session_state.get(
@@ -452,14 +574,22 @@ if barcode_to_process and process_key:
                 quantity,
             )
 
-            st.session_state["last_process_key"] = process_key
+            st.session_state["last_process_key"] = (
+                process_key
+            )
+
             display_scan_result(result)
 
         except Exception as error:
             st.error(
-                f"Erreur pendant la mise à jour de Google Sheets : {error}"
+                "Erreur pendant la mise à jour "
+                f"de Google Sheets : {error}"
             )
 
+
+# ---------------------------------------------------------
+# Vue de la feuille
+# ---------------------------------------------------------
 
 st.divider()
 st.subheader("Vue de la feuille")
@@ -467,10 +597,14 @@ st.subheader("Vue de la feuille")
 column_refresh, column_reset = st.columns(2)
 
 with column_refresh:
-    refresh_clicked = st.button("Rafraîchir")
+    refresh_clicked = st.button(
+        "Rafraîchir"
+    )
 
 with column_reset:
-    reset_clicked = st.button("Réinitialiser Quantity")
+    reset_clicked = st.button(
+        "Réinitialiser Quantity"
+    )
 
 
 if refresh_clicked:
@@ -480,14 +614,18 @@ if refresh_clicked:
 if reset_clicked:
     try:
         reset_quantities(sheet_name)
+
         st.success(
-            f"Quantity réinitialisé pour {sheet_name}."
+            f"Quantity réinitialisé pour "
+            f"{sheet_name}."
         )
+
         st.rerun()
 
     except Exception as error:
         st.error(
-            f"Erreur pendant la réinitialisation : {error}"
+            "Erreur pendant la réinitialisation : "
+            f"{error}"
         )
 
 
