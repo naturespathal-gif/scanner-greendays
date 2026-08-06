@@ -151,7 +151,7 @@ def decode_barcode_from_image_bytes(image_bytes):
     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
     detector = cv2.barcode.BarcodeDetector()
-    ok, decoded_info, decoded_type, points = detector.detectAndDecode(image)
+    decoded_info, points, straight_qrcode = detector.detectAndDecode(image)
 
     if ok and decoded_info:
         for code in decoded_info:
