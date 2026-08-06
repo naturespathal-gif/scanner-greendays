@@ -3,4 +3,5 @@ gspread
 google-auth
 pandas
 numpy
-opencv-contrib-python-headless
+opencv-python-headless
+zxing-cpp
