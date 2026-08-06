@@ -150,15 +150,14 @@ def decode_barcode_from_image_bytes(image_bytes):
     file_bytes = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-    detector = cv2.barcode.BarcodeDetector()
-    decoded_info, points, straight_qrcode = detector.detectAndDecode(image)
+   detector = cv2.QRCodeDetector()
 
-    if ok and decoded_info:
-        for code in decoded_info:
-            if code and str(code).strip():
-                return str(code).strip()
+decoded_info, points, straight_qrcode = detector.detectAndDecode(image)
 
-    return None
+if decoded_info:
+    return decoded_info
+
+return None
 
 st.title("Scanner Fiche Réception")
 st.caption("Application Python + Streamlit reliée à Google Sheets.")
